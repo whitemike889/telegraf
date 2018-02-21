@@ -54,17 +54,6 @@ Refer to the Twitter API, specifically for the User [User Object](https://develo
 		- retweet_count (float): the number of times this Tweet has been retweeted
 		- favorite_count (float): the number of times this Tweet has been Liked (favorited)
 
-### Sample Queries:
-
-This section should contain some useful InfluxDB queries that can be used to
-get started with the plugin or to generate dashboards.  For each query listed,
-describe at a high level what data is returned.
-
-Get the max, mean, and min for the measurement in the last hour:
-```
-SELECT max(field1), mean(field1), min(field1) FROM measurement1 WHERE tag1=bar AND time > now() - 1h GROUP BY tag
-```
-
 ### Example Output:
 
 This section shows example output in Line Protocol format.  You can often use

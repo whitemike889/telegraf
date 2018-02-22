@@ -13,7 +13,7 @@ import (
 
 	"github.com/influxdata/telegraf"
 	"github.com/influxdata/telegraf/internal"
-	// "github.com/influxdata/telegraf/metric"
+	"github.com/influxdata/telegraf/metric"
 	"github.com/influxdata/telegraf/plugins/inputs"
 	"github.com/tidwall/gjson"
 )
@@ -132,7 +132,9 @@ func (y *YouTube) gatherPlaylist(
 	acc telegraf.Accumulator,
 	pageToken string,
 ) error {
-	uri := y.PlaylistItemsURI + "&maxResults=" + strconv.Itoa(y.MaxResults) + "&playlistId=" + y.PlaylistId + "&key=" + y.ApiKey
+	uri := y.PlaylistItemsURI + "&playlistId=" + y.PlaylistId + "&key=" + y.ApiKey
+	mr := strconv.Itoa(y.MaxResults)
+	uri = uri + "&maxResults=" + mr
 
 	if pageToken != "" {
 		uri = uri + "&pageToken=" + pageToken
@@ -142,8 +144,8 @@ func (y *YouTube) gatherPlaylist(
 		return err
 	}
 
-	// msrmnt_name := "youtube"
-	// tags := map[string]string{}
+	msrmnt_name := "youtube"
+	tags := map[string]string{}
 
 	// extract the nextPageToken if it exists
 	nextPageToken := gjson.Get(resp, "nextPageToken")
@@ -164,30 +166,22 @@ func (y *YouTube) gatherPlaylist(
 			return err
 		}
 
-		result := gjson.Get(resp, "items.#.statistics.*Count")
-		for _, stat := range result.Array() {
-			fmt.Println(stat.String())
+		fields := make(map[string]interface{})
+		// the stats from Google Data API come in as quoted strings, and when the gjson lib parses them out,
+		// it goes one step further, wrapping them in [] and then escaping the quotes. Strip it all back!
+		vc := strings.Trim(gjson.Get(resp, "items.#.statistics.viewCount").String(), "[]\"")
+		vcf, err := strconv.ParseFloat(vc, 64)
+		if err != nil {
+			return err
 		}
+		fields["viewCount"] = vcf
 
-		// fmt.Println(strconv.ParseFloat(gjson.Get(resp, "items.#.statistics.viewCount").String(), 64))
-		fields := make(map[string]float64)
-
-		// fields["viewCount"] = gjson.Get(resp, "items.#.statistics.viewCount").Float()
-		// fields["likeCount"] = gjson.Get(resp, "items.#.statistics.likeCount").Num
-		// fields["dislikeCount"] = gjson.Get(resp, "items.#.statistics.dislikeCount").Num
-		// fields["favoriteCount"] = gjson.Get(resp, "items.#.statistics.favoriteCount").Num
-		// fields["commentCount"] = gjson.Get(resp, "items.#.statistics.commentCount").Num
-
-		fmt.Println(fields)
-
-		//
-		// 			m, err := metric.New(msrmnt_name, tags, fields, time.Now().UTC())
-		// 			if err != nil {
-		// 				return err
-		// 			}
-		// 			m.AddTag("videoId", videoId.String())
-		// 			acc.AddFields(m.Name(), fields, m.Tags())
-		// }
+		m, err := metric.New(msrmnt_name, tags, fields, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		m.AddTag("videoId", videoId.String())
+		acc.AddFields(m.Name(), fields, m.Tags())
 	}
 
 	return nil

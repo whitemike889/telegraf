@@ -57,7 +57,7 @@ Refer to the Twitter API, specifically for the User [User Object](https://develo
 ### Example Output:
 
 This section shows example output in Line Protocol format.  You can often use
-`telegraf --input-filter <plugin-name> --test` or use the `file` output to get
+`telegraf --input-filter twitter --test` or use the `file` output to get
 this information.
 
 ```

@@ -2,7 +2,7 @@
 
 The GitHub plugin collects data from GitHub REST API v3 endpoints which respond with JSON. It flattens the JSON and finds all numeric values, treating them as floats.
 
-Refer to the [GitHub REST API v3](https://developer.github.com/v3/), specifically the [User Repositories] (https://developer.github.com/v3/repos/#list-user-repositories), and the 
+Refer to the [GitHub REST API v3](https://developer.github.com/v3/), specifically the [User Repositories](https://developer.github.com/v3/repos/#list-user-repositories), and the [Repository Contributors](https://developer.github.com/v3/repos/#list-contributors).
 
 ### Configuration:
 

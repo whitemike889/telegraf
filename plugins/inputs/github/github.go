@@ -66,7 +66,7 @@ func (c *RealHTTPClient) HTTPClient() *http.Client {
 }
 
 var sampleConfig = `
-  interval = "15m"
+  interval = "24h"
 
   org_id = "YOUR_ORG_ID"
   
@@ -78,13 +78,19 @@ var sampleConfig = `
   ## List of tag names to extract from top-level of JSON server response
   tag_keys = [
     "id",
+	"name",
+	"full_name",
+	"created_at",
+	"updated_at",
+	"pushed_at",
+	"login",
   ]
 	 
-  # fieldpass = ["forks", "open_issues", "watchers", "stargazers_count", "html_url", "name", "login", "contributions"]
-  
   ## HTTP Headers (all values must be strings)
   [inputs.github.headers]
      Authorization = "token YOUR_AUTH_TOKEN"
+
+  fieldpass = ["forks", "open_issues", "watchers", "stargazers_count", "contributions"]
   
 `
 
@@ -156,11 +162,11 @@ func (g *Github) gatherTopStats(
 		}
 		acc.AddFields(metric.Name(), fields, metric.Tags())
 
-		if g.GetContributors && metric.HasTag("name") && metric.HasTag("id") {
+		if g.GetContributors && metric.HasTag("full_name") && metric.HasTag("id") {
 			var repo_name string
 			var repo_id string
 			for k, v := range metric.Tags() {
-				if k == "name" {
+				if k == "full_name" {
 					repo_name = v
 				} else if k == "id" {
 					repo_id = v
@@ -185,7 +191,7 @@ func (g *Github) gatherRepoContributors(
 	repo_name string,
 	repo_id string,
 ) error {
-	repoContributorsURI := "https://api.github.com/repos/" + g.OrgId + "/" + repo_name + "/contributors"
+	repoContributorsURI := "https://api.github.com/repos/" + repo_name + "/contributors"
 
 	resp, _, err := g.sendRequest(repoContributorsURI)
 	if err != nil {

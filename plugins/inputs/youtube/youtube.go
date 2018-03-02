@@ -170,18 +170,20 @@ func (y *YouTube) gatherPlaylist(
 		// the stats from Google Data API come in as quoted strings, and when the gjson lib parses them out,
 		// it goes one step further, wrapping them in [] and then escaping the quotes. Strip it all back!
 		vc := strings.Trim(gjson.Get(resp, "items.#.statistics.viewCount").String(), "[]\"")
-		vcf, err := strconv.ParseFloat(vc, 64)
-		if err != nil {
-			return err
-		}
-		fields["viewCount"] = vcf
+		if vc != "" {
+			vcf, err := strconv.ParseFloat(vc, 64)
+			if err != nil {
+				return err
+			}
+			fields["viewCount"] = vcf
 
-		m, err := metric.New(msrmnt_name, tags, fields, time.Now().UTC())
-		if err != nil {
-			return err
+			m, err := metric.New(msrmnt_name, tags, fields, time.Now().UTC())
+			if err != nil {
+				return err
+			}
+			m.AddTag("videoId", videoId.String())
+			acc.AddFields(m.Name(), fields, m.Tags())
 		}
-		m.AddTag("videoId", videoId.String())
-		acc.AddFields(m.Name(), fields, m.Tags())
 	}
 
 	return nil

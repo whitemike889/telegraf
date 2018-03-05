@@ -138,7 +138,6 @@ func (y *YouTube) gatherPlaylist(
 		// the stats from Google Data API come in as quoted strings, and when the gjson lib parses them out,
 		// it goes one step further, wrapping them in [] and then escaping the quotes. Strip it all back!
 
-		// TODO add other stats besides viewCount
 		vc := strings.Trim(gjson.Get(resp, "items.#.statistics.viewCount").String(), "[]\"")
 		if vc != "" {
 			vcf, err := strconv.ParseFloat(vc, 64)
@@ -146,7 +145,45 @@ func (y *YouTube) gatherPlaylist(
 				return err
 			}
 			fields["viewCount"] = vcf
+		}
 
+		lc := strings.Trim(gjson.Get(resp, "items.#.statistics.likeCount").String(), "[]\"")
+		if lc != "" {
+			lcf, err := strconv.ParseFloat(lc, 64)
+			if err != nil {
+				return err
+			}
+			fields["likeCount"] = lcf
+		}
+
+		dc := strings.Trim(gjson.Get(resp, "items.#.statistics.dislikeCount").String(), "[]\"")
+		if dc != "" {
+			dcf, err := strconv.ParseFloat(dc, 64)
+			if err != nil {
+				return err
+			}
+			fields["dislikeCount"] = dcf
+		}
+
+		fc := strings.Trim(gjson.Get(resp, "items.#.statistics.favoriteCount").String(), "[]\"")
+		if fc != "" {
+			fcf, err := strconv.ParseFloat(fc, 64)
+			if err != nil {
+				return err
+			}
+			fields["favoriteCount"] = fcf
+		}
+
+		cc := strings.Trim(gjson.Get(resp, "items.#.statistics.commentCount").String(), "[]\"")
+		if cc != "" {
+			ccf, err := strconv.ParseFloat(cc, 64)
+			if err != nil {
+				return err
+			}
+			fields["commentCount"] = ccf
+		}
+
+		if len(fields) > 0 {
 			m, err := metric.New(msrmnt_name, tags, fields, time.Now().UTC())
 			if err != nil {
 				return err

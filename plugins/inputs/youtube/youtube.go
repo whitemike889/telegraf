@@ -35,39 +35,13 @@ type YouTube struct {
 	ResponseTimeout    internal.Duration
 	Parameters         map[string]string
 	Headers            map[string]string
-
-	client HTTPClient
 }
 
-type HTTPClient interface {
-	// Returns the result of an http request
-	//
-	// Parameters:
-	// req: HTTP request object
-	//
-	// Returns:
-	// http.Response:  HTTP respons object
-	// error        :  Any error that may have occurred
-	MakeRequest(req *http.Request) (*http.Response, error)
-
-	SetHTTPClient(client *http.Client)
-	HTTPClient() *http.Client
-}
-
-type RealHTTPClient struct {
-	client *http.Client
-}
-
-func (c *RealHTTPClient) MakeRequest(req *http.Request) (*http.Response, error) {
-	return c.client.Do(req)
-}
-
-func (c *RealHTTPClient) SetHTTPClient(client *http.Client) {
-	c.client = client
-}
-
-func (c *RealHTTPClient) HTTPClient() *http.Client {
-	return c.client
+func NewYouTube() *YouTube {
+	return &YouTube{
+		PlaylistItemsURI:   "https://www.googleapis.com/youtube/v3/playlistItems?part=snippet",
+		VideoStatisticsURI: "https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet",
+	}
 }
 
 var sampleConfig = `
@@ -77,12 +51,6 @@ var sampleConfig = `
   max_results = 5
 
   api_key = "my-api-key"
-  
-  ## Set response_timeout (default 5 seconds)
-  response_timeout = "5s"
-
-  ## HTTP method to use: GET or POST (case-sensitive)
-  method = "GET"
   
   fieldpass = ["*statistics_*"]
 `
@@ -98,17 +66,17 @@ func (y *YouTube) Description() string {
 // Gathers data for all videos in a playlist.
 func (y *YouTube) Gather(accumulator telegraf.Accumulator) error {
 	var wg sync.WaitGroup
-
-	if y.client.HTTPClient() == nil {
-		tr := &http.Transport{
-			ResponseHeaderTimeout: y.ResponseTimeout.Duration,
-		}
-		client := &http.Client{
-			Transport: tr,
-			Timeout:   y.ResponseTimeout.Duration,
-		}
-		y.client.SetHTTPClient(client)
-	}
+	//
+	// if y.client.HTTPClient() == nil {
+	// 	tr := &http.Transport{
+	// 		ResponseHeaderTimeout: y.ResponseTimeout.Duration,
+	// 	}
+	// 	client := &http.Client{
+	// 		Transport: tr,
+	// 		Timeout:   y.ResponseTimeout.Duration,
+	// 	}
+	// 	y.client.SetHTTPClient(client)
+	// }
 
 	wg.Add(1)
 	go func() {
@@ -139,7 +107,7 @@ func (y *YouTube) gatherPlaylist(
 	if pageToken != "" {
 		uri = uri + "&pageToken=" + pageToken
 	}
-	resp, _, err := y.sendRequest(uri)
+	resp, err := y.sendRequest(uri)
 	if err != nil {
 		return err
 	}
@@ -161,7 +129,7 @@ func (y *YouTube) gatherPlaylist(
 	// for each video id, request the stats for that video
 	for _, videoId := range videoIds.Array() {
 		// get stats
-		resp, _, err := y.sendRequest(y.VideoStatisticsURI + "&id=" + videoId.String() + "&key=" + y.ApiKey)
+		resp, err := y.sendRequest(y.VideoStatisticsURI + "&id=" + videoId.String() + "&key=" + y.ApiKey)
 		if err != nil {
 			return err
 		}
@@ -169,6 +137,8 @@ func (y *YouTube) gatherPlaylist(
 		fields := make(map[string]interface{})
 		// the stats from Google Data API come in as quoted strings, and when the gjson lib parses them out,
 		// it goes one step further, wrapping them in [] and then escaping the quotes. Strip it all back!
+
+		// TODO add other stats besides viewCount
 		vc := strings.Trim(gjson.Get(resp, "items.#.statistics.viewCount").String(), "[]\"")
 		if vc != "" {
 			vcf, err := strconv.ParseFloat(vc, 64)
@@ -197,48 +167,37 @@ func (y *YouTube) gatherPlaylist(
 // Returns:
 //     string: body of the response
 //     error : Any error that may have occurred
-func (y *YouTube) sendRequest(serverURL string) (string, float64, error) {
+func (y *YouTube) sendRequest(serverURL string) (string, error) {
 	// Prepare URL
 	requestURL, err := url.Parse(serverURL)
 	if err != nil {
-		return "", -1, fmt.Errorf("Invalid server URL \"%s\"", serverURL)
+		return "", fmt.Errorf("Invalid server URL \"%s\"", serverURL)
 	}
 
-	data := url.Values{}
-	switch {
-	case y.Method == "GET":
-		params := requestURL.Query()
-		for k, v := range y.Parameters {
-			params.Add(k, v)
-		}
-		requestURL.RawQuery = params.Encode()
-
-	case y.Method == "POST":
-		requestURL.RawQuery = ""
-		for k, v := range y.Parameters {
-			data.Add(k, v)
-		}
+	tr := &http.Transport{
+		ResponseHeaderTimeout: y.ResponseTimeout.Duration,
 	}
 
-	// Create + send request
-	req, err := http.NewRequest(y.Method, requestURL.String(),
-		strings.NewReader(data.Encode()))
+	client := &http.Client{
+		Transport: tr,
+		Timeout:   y.ResponseTimeout.Duration,
+	}
+
+	var b bytes.Buffer
+	req, err := http.NewRequest("GET", requestURL.String(), &b)
 	if err != nil {
-		return "", -1, err
+		return "", err
 	}
 
-	start := time.Now()
-	resp, err := y.client.MakeRequest(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		return "", -1, err
+		return "", err
 	}
-
 	defer resp.Body.Close()
-	responseTime := time.Since(start).Seconds()
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return string(body), responseTime, err
+		return string(body), err
 	}
 	body = bytes.TrimPrefix(body, utf8BOM)
 
@@ -250,21 +209,14 @@ func (y *YouTube) sendRequest(serverURL string) (string, float64, error) {
 			http.StatusText(resp.StatusCode),
 			http.StatusOK,
 			http.StatusText(http.StatusOK))
-		return string(body), responseTime, err
+		return string(body), err
 	}
 
-	return string(body), responseTime, err
+	return string(body), err
 }
 
 func init() {
 	inputs.Add("youtube", func() telegraf.Input {
-		return &YouTube{
-			client: &RealHTTPClient{},
-			ResponseTimeout: internal.Duration{
-				Duration: 5 * time.Second,
-			},
-			PlaylistItemsURI:   "https://www.googleapis.com/youtube/v3/playlistItems?part=snippet",
-			VideoStatisticsURI: "https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet",
-		}
+		return NewYouTube()
 	})
 }

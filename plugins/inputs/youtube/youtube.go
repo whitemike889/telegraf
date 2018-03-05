@@ -2,7 +2,6 @@ package youtube
 
 import (
 	"bytes"
-	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/url"
@@ -12,43 +11,42 @@ import (
 	"time"
 
 	"github.com/influxdata/telegraf"
-	"github.com/influxdata/telegraf/internal"
 	"github.com/influxdata/telegraf/metric"
 	"github.com/influxdata/telegraf/plugins/inputs"
 	"github.com/tidwall/gjson"
 )
 
-var (
-	utf8BOM = []byte("\xef\xbb\xbf")
+const (
+	playlist_items_endpoint   string = "/youtube/v3/playlistItems"
+	video_statistics_endpoint string = "/youtube/v3/videos"
 )
 
 // YouTube struct
 type YouTube struct {
-	Name               string
-	PlaylistId         string
-	MaxResults         int
-	PlaylistItemsURI   string
-	VideoStatisticsURI string
-	ApiKey             string
-	TagKeys            []string
-	Method             string
-	ResponseTimeout    internal.Duration
-	Parameters         map[string]string
-	Headers            map[string]string
+	PlaylistId string
+	ApiKey     string
+	TagKeys    []string
+
+	Transport http.RoundTripper
+
+	sync.Mutex
+
+	playlist_url *url.URL
+	stats_url    *url.URL
 }
 
 func NewYouTube() *YouTube {
-	return &YouTube{
-		PlaylistItemsURI:   "https://www.googleapis.com/youtube/v3/playlistItems?part=snippet",
-		VideoStatisticsURI: "https://www.googleapis.com/youtube/v3/videos?part=statistics,snippet",
-	}
+	u := &url.URL{}
+	u.Scheme = "https"
+	u.Host = "www.googleapis.com"
+
+	return &YouTube{playlist_url: u, stats_url: u}
 }
 
 var sampleConfig = `
   interval = "15m"
 
   playlist_id = "my-playlist-id"
-  max_results = 5
 
   api_key = "my-api-key"
   
@@ -65,27 +63,9 @@ func (y *YouTube) Description() string {
 
 // Gathers data for all videos in a playlist.
 func (y *YouTube) Gather(accumulator telegraf.Accumulator) error {
-	var wg sync.WaitGroup
-	//
-	// if y.client.HTTPClient() == nil {
-	// 	tr := &http.Transport{
-	// 		ResponseHeaderTimeout: y.ResponseTimeout.Duration,
-	// 	}
-	// 	client := &http.Client{
-	// 		Transport: tr,
-	// 		Timeout:   y.ResponseTimeout.Duration,
-	// 	}
-	// 	y.client.SetHTTPClient(client)
-	// }
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		accumulator.AddError(y.gatherPlaylist(accumulator, ""))
-	}()
-
-	wg.Wait()
-
+	y.Lock()
+	defer y.Unlock()
+	accumulator.AddError(y.gatherPlaylist(accumulator, ""))
 	return nil
 }
 
@@ -100,23 +80,28 @@ func (y *YouTube) gatherPlaylist(
 	acc telegraf.Accumulator,
 	pageToken string,
 ) error {
-	uri := y.PlaylistItemsURI + "&playlistId=" + y.PlaylistId + "&key=" + y.ApiKey
-	mr := strconv.Itoa(y.MaxResults)
-	uri = uri + "&maxResults=" + mr
+	y.playlist_url.Path = playlist_items_endpoint
+	parameters := url.Values{}
+	parameters.Add("part", "snippet")
+	parameters.Add("playlistId", y.PlaylistId)
+	parameters.Add("key", y.ApiKey)
 
 	if pageToken != "" {
-		uri = uri + "&pageToken=" + pageToken
+		parameters.Add("pageToken", pageToken)
 	}
-	resp, err := y.sendRequest(uri)
+	y.playlist_url.RawQuery = parameters.Encode()
+
+	playlist_resp, err := sendRequest(y, y.playlist_url.String())
 	if err != nil {
 		return err
 	}
 
-	msrmnt_name := "youtube"
 	tags := map[string]string{}
 
+	playlist_resp_str := string(playlist_resp)
+
 	// extract the nextPageToken if it exists
-	nextPageToken := gjson.Get(resp, "nextPageToken")
+	nextPageToken := gjson.Get(playlist_resp_str, "nextPageToken")
 	// if there is a "nextPageToken", then there are still more pages of
 	// results to process, so call them recursively now
 	if nextPageToken.Exists() {
@@ -124,67 +109,27 @@ func (y *YouTube) gatherPlaylist(
 	}
 
 	// extract all of the videoIds here
-	videoIds := gjson.Get(resp, "items.#.snippet.resourceId.videoId")
+	videoIds := gjson.Get(playlist_resp_str, "items.#.snippet.resourceId.videoId")
 
 	// for each video id, request the stats for that video
 	for _, videoId := range videoIds.Array() {
 		// get stats
-		resp, err := y.sendRequest(y.VideoStatisticsURI + "&id=" + videoId.String() + "&key=" + y.ApiKey)
+		y.stats_url.Path = video_statistics_endpoint
+		params := url.Values{}
+		params.Add("part", "statistics")
+		params.Add("key", y.ApiKey)
+		params.Add("id", videoId.String())
+		y.stats_url.RawQuery = params.Encode()
+
+		stats_resp, err := sendRequest(y, y.stats_url.String())
 		if err != nil {
 			return err
 		}
 
-		fields := make(map[string]interface{})
-		// the stats from Google Data API come in as quoted strings, and when the gjson lib parses them out,
-		// it goes one step further, wrapping them in [] and then escaping the quotes. Strip it all back!
-
-		vc := strings.Trim(gjson.Get(resp, "items.#.statistics.viewCount").String(), "[]\"")
-		if vc != "" {
-			vcf, err := strconv.ParseFloat(vc, 64)
-			if err != nil {
-				return err
-			}
-			fields["viewCount"] = vcf
-		}
-
-		lc := strings.Trim(gjson.Get(resp, "items.#.statistics.likeCount").String(), "[]\"")
-		if lc != "" {
-			lcf, err := strconv.ParseFloat(lc, 64)
-			if err != nil {
-				return err
-			}
-			fields["likeCount"] = lcf
-		}
-
-		dc := strings.Trim(gjson.Get(resp, "items.#.statistics.dislikeCount").String(), "[]\"")
-		if dc != "" {
-			dcf, err := strconv.ParseFloat(dc, 64)
-			if err != nil {
-				return err
-			}
-			fields["dislikeCount"] = dcf
-		}
-
-		fc := strings.Trim(gjson.Get(resp, "items.#.statistics.favoriteCount").String(), "[]\"")
-		if fc != "" {
-			fcf, err := strconv.ParseFloat(fc, 64)
-			if err != nil {
-				return err
-			}
-			fields["favoriteCount"] = fcf
-		}
-
-		cc := strings.Trim(gjson.Get(resp, "items.#.statistics.commentCount").String(), "[]\"")
-		if cc != "" {
-			ccf, err := strconv.ParseFloat(cc, 64)
-			if err != nil {
-				return err
-			}
-			fields["commentCount"] = ccf
-		}
+		fields, err := extractAllStats(string(stats_resp))
 
 		if len(fields) > 0 {
-			m, err := metric.New(msrmnt_name, tags, fields, time.Now().UTC())
+			m, err := metric.New("youtube", tags, fields, time.Now().UTC())
 			if err != nil {
 				return err
 			}
@@ -196,60 +141,83 @@ func (y *YouTube) gatherPlaylist(
 	return nil
 }
 
-// Sends an HTTP request to the server using the HttpJson object's HTTPClient.
-// This request will be a GET.
-// Parameters:
-//     serverURL: endpoint to send request to
-//
-// Returns:
-//     string: body of the response
-//     error : Any error that may have occurred
-func (y *YouTube) sendRequest(serverURL string) (string, error) {
-	// Prepare URL
-	requestURL, err := url.Parse(serverURL)
+func extractAllStats(json string) (map[string]interface{}, error) {
+	fields := make(map[string]interface{})
+
+	vcf, err := extractStat("viewCount", json)
 	if err != nil {
-		return "", fmt.Errorf("Invalid server URL \"%s\"", serverURL)
+		return nil, err
+	} else if vcf >= 0 {
+		fields["viewCount"] = vcf
 	}
 
-	tr := &http.Transport{
-		ResponseHeaderTimeout: y.ResponseTimeout.Duration,
+	lcf, err := extractStat("likeCount", json)
+	if err != nil {
+		return nil, err
+	} else if lcf >= 0 {
+		fields["likeCount"] = lcf
 	}
 
+	dcf, err := extractStat("dislikeCount", json)
+	if err != nil {
+		return nil, err
+	} else if dcf >= 0 {
+		fields["dislikeCount"] = dcf
+	}
+
+	fcf, err := extractStat("favoriteCount", json)
+	if err != nil {
+		return nil, err
+	} else if fcf >= 0 {
+		fields["favoriteCount"] = fcf
+	}
+
+	ccf, err := extractStat("commentCount", json)
+	if err != nil {
+		return nil, err
+	} else if ccf >= 0 {
+		fields["commentCount"] = ccf
+	}
+
+	return fields, nil
+}
+
+func extractStat(statName string, json string) (float64, error) {
+	stat := strings.Trim(gjson.Get(json, "items.#.statistics."+statName).String(), "[]\"")
+	if stat != "" {
+		stat_f, err := strconv.ParseFloat(stat, 64)
+		if err != nil {
+			return -1, err
+		}
+		return stat_f, nil
+	}
+	return -1, nil
+}
+
+func sendRequest(y *YouTube, url string) ([]byte, error) {
 	client := &http.Client{
-		Transport: tr,
-		Timeout:   y.ResponseTimeout.Duration,
+		Transport: y.Transport,
+		Timeout:   time.Duration(4 * time.Second),
 	}
 
 	var b bytes.Buffer
-	req, err := http.NewRequest("GET", requestURL.String(), &b)
+	req, err := http.NewRequest("GET", url, &b)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		return string(body), err
-	}
-	body = bytes.TrimPrefix(body, utf8BOM)
-
-	// Process response
-	if resp.StatusCode != http.StatusOK {
-		err = fmt.Errorf("Response from url \"%s\" has status code %d (%s), expected %d (%s)",
-			requestURL.String(),
-			resp.StatusCode,
-			http.StatusText(resp.StatusCode),
-			http.StatusOK,
-			http.StatusText(http.StatusOK))
-		return string(body), err
+		return nil, err
 	}
 
-	return string(body), err
+	return body, nil
 }
 
 func init() {

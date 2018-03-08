@@ -5,8 +5,6 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/url"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -61,25 +59,20 @@ func (y *YouTube) Description() string {
 	return "Read flattened metrics from YouTube API HTTP endpoints"
 }
 
-// Gathers data for all videos in a playlist.
 func (y *YouTube) Gather(accumulator telegraf.Accumulator) error {
 	y.Lock()
 	defer y.Unlock()
-	accumulator.AddError(y.gatherPlaylist(accumulator, ""))
+	videoIds, err := y.gatherPlaylist("")
+	if err != nil {
+		return err
+	}
+	accumulator.AddError(y.gatherVideoStatistics(accumulator, videoIds))
 	return nil
 }
 
-// Gathers data from a youtube endpoints for videos in a playlist
-// Parameters:
-//     acc      	: The telegraf Accumulator to use
-//	   pageToken	: The page token to request (if paging through results)
-//
-// Returns:
-//     error: Any error that may have occurred
 func (y *YouTube) gatherPlaylist(
-	acc telegraf.Accumulator,
 	pageToken string,
-) error {
+) ([]string, error) {
 	y.playlist_url.Path = playlist_items_endpoint
 	parameters := url.Values{}
 	parameters.Add("part", "snippet")
@@ -93,32 +86,46 @@ func (y *YouTube) gatherPlaylist(
 
 	playlist_resp, err := sendRequest(y, y.playlist_url.String())
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	tags := map[string]string{}
-
 	playlist_resp_str := string(playlist_resp)
+
+	resultsPerPage := gjson.Get(playlist_resp_str, "pageInfo.resultsPerPage").Int()
+	videoIds := make([]string, resultsPerPage)
 
 	// extract the nextPageToken if it exists
 	nextPageToken := gjson.Get(playlist_resp_str, "nextPageToken")
 	// if there is a "nextPageToken", then there are still more pages of
 	// results to process, so call them recursively now
 	if nextPageToken.Exists() {
-		acc.AddError(y.gatherPlaylist(acc, nextPageToken.String()))
+		nextPageVideoIds, err := y.gatherPlaylist(nextPageToken.String())
+		if err != nil {
+			return nil, err
+		}
+		videoIds = append(videoIds, nextPageVideoIds...)
 	}
 
 	// extract all of the videoIds here
-	videoIds := gjson.Get(playlist_resp_str, "items.#.snippet.resourceId.videoId")
+	result := gjson.Get(playlist_resp_str, "items.#.snippet.resourceId.videoId")
+	for i, videoId := range result.Array() {
+		videoIds[i] = videoId.String()
+	}
 
-	// for each video id, request the stats for that video
-	for _, videoId := range videoIds.Array() {
+	return videoIds, nil
+}
+
+func (y *YouTube) gatherVideoStatistics(
+	acc telegraf.Accumulator,
+	videoIds []string,
+) error {
+	for _, videoId := range videoIds {
 		// get stats
 		y.stats_url.Path = video_statistics_endpoint
 		params := url.Values{}
 		params.Add("part", "statistics")
 		params.Add("key", y.ApiKey)
-		params.Add("id", videoId.String())
+		params.Add("id", videoId)
 		y.stats_url.RawQuery = params.Encode()
 
 		stats_resp, err := sendRequest(y, y.stats_url.String())
@@ -126,14 +133,17 @@ func (y *YouTube) gatherPlaylist(
 			return err
 		}
 
-		fields, err := extractAllStats(string(stats_resp))
+		fields := make(map[string]interface{})
+		extractAllStats(string(stats_resp), videoId, fields)
+
+		tags := map[string]string{}
 
 		if len(fields) > 0 {
 			m, err := metric.New("youtube", tags, fields, time.Now().UTC())
 			if err != nil {
 				return err
 			}
-			m.AddTag("videoId", videoId.String())
+			m.AddTag("videoId", videoId)
 			acc.AddFields(m.Name(), fields, m.Tags())
 		}
 	}
@@ -141,57 +151,25 @@ func (y *YouTube) gatherPlaylist(
 	return nil
 }
 
-func extractAllStats(json string) (map[string]interface{}, error) {
-	fields := make(map[string]interface{})
+func extractAllStats(json string, videoId string, fields map[string]interface{}) error {
+	result := gjson.Get(json, "items.#[id==\""+videoId+"\"].statistics")
+	result.ForEach(func(key, value gjson.Result) bool {
+		viewCount := result.Get("viewCount").Int()
+		likeCount := result.Get("likeCount").Int()
+		dislikeCount := result.Get("dislikeCount").Int()
+		favoriteCount := result.Get("favoriteCount").Int()
+		commentCount := result.Get("commentCount").Int()
 
-	vcf, err := extractStat("viewCount", json)
-	if err != nil {
-		return nil, err
-	} else if vcf >= 0 {
-		fields["viewCount"] = vcf
-	}
+		fields["viewCount"] = viewCount
+		fields["likeCount"] = likeCount
+		fields["dislikeCount"] = dislikeCount
+		fields["favoriteCount"] = favoriteCount
+		fields["commentCount"] = commentCount
 
-	lcf, err := extractStat("likeCount", json)
-	if err != nil {
-		return nil, err
-	} else if lcf >= 0 {
-		fields["likeCount"] = lcf
-	}
+		return true // keep iterating
+	})
 
-	dcf, err := extractStat("dislikeCount", json)
-	if err != nil {
-		return nil, err
-	} else if dcf >= 0 {
-		fields["dislikeCount"] = dcf
-	}
-
-	fcf, err := extractStat("favoriteCount", json)
-	if err != nil {
-		return nil, err
-	} else if fcf >= 0 {
-		fields["favoriteCount"] = fcf
-	}
-
-	ccf, err := extractStat("commentCount", json)
-	if err != nil {
-		return nil, err
-	} else if ccf >= 0 {
-		fields["commentCount"] = ccf
-	}
-
-	return fields, nil
-}
-
-func extractStat(statName string, json string) (float64, error) {
-	stat := strings.Trim(gjson.Get(json, "items.#.statistics."+statName).String(), "[]\"")
-	if stat != "" {
-		stat_f, err := strconv.ParseFloat(stat, 64)
-		if err != nil {
-			return -1, err
-		}
-		return stat_f, nil
-	}
-	return -1, nil
+	return nil
 }
 
 func sendRequest(y *YouTube, url string) ([]byte, error) {
